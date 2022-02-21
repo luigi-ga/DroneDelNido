@@ -1,0 +1,236 @@
+Luigi GALLO - Gara elettronica 2018 - Bergamo 3 Maggio 2018
+
+Delle possibili soluzioni elencate, ho scelto di realizzare la soluzione numero 2: progetto con microcontrollore PIC18F4580 e scheda "miniPicPlus" con PICKIT2.
+
+Come risorse interne del pic, utilizzerò il timer0, timer1, timer2, timer3, registro INTCON, moduli I/O. 
+
+Ho previsto l'utilizzo di un condensatore di by-pass sull'alimentazione da 100nF (C_bypass).
+
+
+
+Ho deciso di dividere il sistema in tre blocchi fondamentali: 
+Blocco 1: Trasmissione del segnale
+Blocco 2: Ricezione del segnale e calcolo della distanza
+Blocco 3: Visualizzazione della distanza su display 
+
+
+
+
+BLOCCO 1: Trasmissione del segnale
+La trasmissione del segnale consiste nella generazione di un "burst" costituito da 8 impulsi; la frequenza degli impulsi dovrà essere di 34KHz con una tolleranza del 5%.
+Per generare questa frequenza, utilizzeremo il timer2, tenendo conto della velocità del suono.
+Calcoliamo quindi il periodo degli impulsi sapendo che questo è pari al tempo che impiega il suono, ad una temperatura di 20°C, a percorrere 1cm.
+Per fare questo, utilizzo la formula per il calcolo della velocità (velocità=spazio/tempo) e, adoperando la formula inversa (tempo=spazio/velocità), posso ricavare il periodo T degli impulsi.
+T=0.01m/(331,4+0.62*20°C)=0.01m/343.8m/s=29us, circa 30us.
+Per la generazione del segnale utilizzerò anche l'interrupt.
+
+Il primo "burst" viene generato alla pressione di un pulsante, collegato ad RC4. Lo schema di questo pulsante prevede una resistenza di pull-up, mentre il pulsante è collegato verso massa. Quando viene premuto, sul pin
+RC4, si presenta un livello logico basso; in questa situazione, viene abilitato il timer1 (TMR1ON=1) che avvierà a sua volta il ciclo di trasmissione del segnale.
+
+Timer2:
+La generazione del segnale funzionerà nel seguente modo: il Timer2 verrà impostato in modo tale da raggiungere un overflow nel tempo di 15us; al raggiungimento dell'overflow (TMR2IF==1), scatta l'interrupt.
+Quando scatta l'interrupt, generato dal modulo Timer2, verranno eseguite le seguenti operazioni: per 16 volte verrà commutato il livello logico di un pin del PIC, partendo da livello logico basso, 
+e verrà impostato nuovamente il valore di TMR2 da cui dovremo partire per ottenere l'overflow nel tempo stabilito. 
+L'operazione di commutazione dovrà essere eseguita 16 volte perché il nostro "burst" è costituito da 8 impulsi con frequenza 34KHz (30ms di periodo) e, commutando lo stato di un pin per 16 volte ogni 15us,
+riusciamo a generare un'onda quadra con le caratteristiche richieste. Per fare questo, creiamo una variabile (numero_overflow) che incrementa ogni volta che scatta l'overflow (partendo da 0). Quando questa
+variabile raggiunge il valore 16, il timer2 viene disabilitato e la variabile viene resettata.
+
+Dimensionamento del Timer2:
+Come già stabilito, il Timer2 dovrà raggiungere un overflow nel tempo di 15us. Scegliendo la frequenza di oscillazione pari a 4MHz (OSCCON = 0x60), il registro TMR2 verrà incrementato con una frequenza di 
+FOSC/4, nel nostro caso 4MHz/4=1MHz (periodo di 1us). Il registro TMR2 dovrà essere incrementato partendo da un valore che ci permetta di raggiungere l'overflow in 15 incrementi. 
+Sapendo che il registro in questione è ad 8bit (0-255 dec), e che il bit flag viene settato al raggiungimento dell'overflow, per ottenere un overflow in 15us dobbiamo partire da un valore di 256-15=241. 
+Partendo da un valore di 241,otterremo un overflow ogni 15us. 
+Quando il Timer avrà raggiunto un numero di overflow pari a 16, e quindi generato il segnale desiderato, il Timer2 verrà temporaneamente disabilitato (TMR2ON=0) per evitare che continui a generare l'onda quadra.
+
+La generazione del "burst" dovrà essere effettuata ogni 100ms alla distanza di 10m, e diminuire di 10ms per ogni metro di avvicinamento alla base. 
+Il timer2 dovrà essere quindi riattivato (TMR2ON=1) dopo un tempo determinato dalla distanza. 
+A determinare il tempo di attivazione del timer2 sarà il timer1. 
+
+Timer1:
+Come già stabilito, il timer1 avrà il compito di misurare la periodicità con la quale viene generato il burst. Anche il timer1 utilizzerà l'interrupt.
+Il timer1 agirà nel seguente modo: in base alla distanza, si determina il valore da cui deve partire il registro TMR1 per ottenere un'overflow nel tempo stabilito; al raggiungimento dell'overflow (TMR1IF==1), scatta l'interrupt.
+Quando scatta l'interrupt, generato dal modulo Timer1, verrà impostato nuovamente il valore di partenza del registro TMR2 e il modulo Timer2 verrà riabilitato (TMR2ON=1).
+
+Dimensionamento del Timer1:
+Il timer1 dovrà raggiungere un overflow nel tempo massimo di 100ms e in un tempo minimo di 10ms. Sapendo che la frequenza di sistema è di 4MHz e che la coppia di registri viene incrementata ad una frequenza di FOSC/4, 
+nel nostro caso avremo un incremento ogni 1us. Poiché il registro è a 16bit, ci permette di ottenere un tempo massimo di overflow pari a 65000us (65ms) che non sono sufficienti nel caso in cui la distanza è maggiore di 7 metri;
+pertanto occorre utilizzare il prescaler con fattore di divisione 1:2. In questo modo riusciremo ad ottenere l'overflow del registro in un tempo massimo di 131072us (131ms) che nel nostro caso è più che sufficente.
+Occorre ora determinare i valori da cui dobbiamo partire. Per determinare tali valori utilizzeremo prima una proporzione per calcolare il numero di incrementi da effettuare, e poi, sottraendo al valore massimo del registro (65536)
+il numero di incrementi trovato, otterremo il valore da cui dovremo partire per ottenere quell'overflow.
+Le formule sono le seguenti:
+Formula1: calcolo del numero di incrementi: 131072us:65536=periodo:numero_incrementi. In questa proporzione, 131072 sono i us in cui, effettuati 65536 incrementi, si raggiunge l'overflow; periodo è il tempo (in us) di overflow
+che vogliamo ottenere e numero_incrementi è, appunto, il numero di incrementi da effettuare per ottenere il tempo stabilito. 
+Formula2: calcolo del valore di partenza: per calcolare il valore da cui dovremo partire (per ottenere l'overflow dei registri nel tempo stabilito), dovremo semplicemente sottrarre al valore massimo del registro, il
+numero_incrementi da effettuare. La formula è la seguente: valore_partenza=65536-numero_incrementi.
+
+Applichiamo ora le formule descritte per trovare i "valore_partenza" relativi ad ogni distanza:
+
+se la distanza è maggiore di 10 metri, dobbiamo raggiungere l'overflow in 100ms:
+numero_incrementi=(periodo*65536)/131072=(100000us*65536)/131072us=50000
+valore_partenza=65536-50000=15536. (0x3C60)
+
+se la distanza è maggiore di 9 metri e minore di 10 metri, dobbiamo raggiungere l'overflow in 90ms:
+numero_incrementi=(periodo*65536)/131072=(90000us*65536)/131072us=45000
+valore_partenza=65536-45000=20536. (0x5038)
+
+se la distanza è maggiore di 8 metri e minore di 9 metri, dobbiamo raggiungere l'overflow in 80ms:
+numero_incrementi=(periodo*65536)/131072=(80000us*65536)/131072us=40000
+valore_partenza=65536-40000=25536. (0x63C0)
+
+se la distanza è maggiore di 7 metri e minore di 8 metri, dobbiamo raggiungere l'overflow in 70ms:
+numero_incrementi=(periodo*65536)/131072=(70000us*65536)/131072us=35000
+valore_partenza=65536-35000=30536. (0x7748)
+
+se la distanza è maggiore di 6 metri e minore di 7 metri, dobbiamo raggiungere l'overflow in 60ms:
+numero_incrementi=(periodo*65536)/131072=(60000us*65536)/131072us=30000
+valore_partenza=65536-30000=35536. (0x8AD0)
+
+se la distanza è maggiore di 5 metri e minore di 6 metri, dobbiamo raggiungere l'overflow in 50ms:
+numero_incrementi=(periodo*65536)/131072=(50000us*65536)/131072us=25000
+valore_partenza=65536-25000=40536. (0x9E58)
+
+se la distanza è maggiore di 4 metri e minore di 5 metri, dobbiamo raggiungere l'overflow in 40ms:
+numero_incrementi=(periodo*65536)/131072=(40000us*65536)/131072us=20000
+valore_partenza=65536-20000=45536. (0x61E0)
+
+se la distanza è maggiore di 3 metri e minore di 4 metri, dobbiamo raggiungere l'overflow in 30ms:
+numero_incrementi=(periodo*65536)/131072=(30000us*65536)/131072us=15000
+valore_partenza=65536-15000=50536. (0xC568)
+
+se la distanza è maggiore di 2 metri e minore di 3 metri, dobbiamo raggiungere l'overflow in 20ms:
+numero_incrementi=(periodo*65536)/131072=(20000us*65536)/131072us=10000
+valore_partenza=65536-10000=55536. (0xD8F0)
+
+se la distanza è maggiore di 1 metro e minore di 2 metri, dobbiamo raggiungere l'overflow in 10ms:
+numero_incrementi=(periodo*65536)/131072=(10000us*65536)/131072us=5000
+valore_partenza=65536-5000=60536. (0xEC78)
+
+Osservando i "valore_partenza" trovati, possiamo notare che, per ogni metro che il drone si avvicina alla base, la variabile aumenta di 5000. C'è quindi una proporzionalità per identificare questo valore in base
+alla distanza che intercorre; la proporzionalità è la seguente: valore_partenza=65536-(5000*distanza_in_metri) oppure valore_partenza=65536-(50*distanza_in_centimetri).
+
+Quando la coppia di registri avràraggiunto l'overflow (TMR1IF==1), scatteràl'interrupt. 
+All'interno dell'interrupt andremo a impostare nuovamente il valore da cui deve partire il conteggio del registro TMR2 ed andremo ad abilitare il Timer2, che si disabiliterà automaticamente dopo aver eseguito i 16 cicli; 
+avvieremo di nuovo il conteggio del timer1, e resetteremo il bit flag.
+
+Con queste ultime operazioni, abbiamo definito quello che prevedeva il primo blocco: la trasmissione del segnale.
+In questo blocco vengono adoperato 2 timer (timer1 e timer2) con due compiti differenti:
+Il timer2 è stato utilizzato per generare il pacchetto di 8 impulsi alla frequenza di 34KHz e il timer1 è stato utilizzato per determinare la periodicità con cui occorre generare il burst.
+Entrambe i moduli adoperati utilizzano l'interrupt.
+
+Il segnale in uscita da questo blocco sarà quindi generato sul pin RD0.
+
+
+
+
+BLOCCO 2: Ricezione del segnale e calcolo della distanza
+Per calcolare la velocità, verrà utilizzato un altro timer, il timer0. 
+Questo timer funzionerà nel seguente modo: inizialmente il timer0 è disabilitato (TMR0ON=0); quando comincio a generare il segnale (nell'interrupt generato dal timer1), resetto la coppia di registri (TMR0H-TMR0L) 
+e avvio il conteggio del timer0 (TMR0ON=1). Quando il ricevitore IR-Rx emette sul pin 1 (collegato al pin RB1/INT1 del microcontrollore) un fronte di discesa, scatta l'interrupt (generato dal registro INTCON).
+All'interno dell'interrupt, il conteggio del tempo verrà fermato (TMR0ON=0), ed andremo a rilevare il tempo trascorso. Tramite le formule fornite, convertiremo poi il tempo nella distanza che c'è fra il drone ed il nido.
+Prima che il conteggio venga riavviato, andremo a resettare i registri TMR0H-TMR0L.
+
+Come prima cosa, occorre determinare il tempo massimo che potebbe impiegare il pacchetto di impulsi generato a raggiungere la base.
+Per fare questo, utilizzeremo la formula fornita dal testo Ttx=distanza/velocità.
+
+Supponendo una distanza di 10 metri, ed una temperatura di 20°C, calcolo il tempo:
+(la velocità, del suono calcolata precedentemente, è di 343.8m/s alla temperatura di 20°C)
+Ttx=10m/343.8m/s=0.029s=30ms circa
+Il tempo che impiega il segnale generato a raggiungere la base ad una distanza di 10metri è di 30ms.
+Calcolare questo tempo è utile perché sarà il limite oltre il quale la distanza sarà maggiore di 10 metri e, in questo caso, continueremo a visualizzare la distanza massima (9,99m).
+
+Sapendo ora il tempo massimo da misurare, procediamo dimensionando il timer0.
+
+Dimensionamento timer0:
+la coppia di registri TMR0H-TMR0L, sarà incrementata da un segnale di frequenza FOSC/4, nel nostro caso 4MHz/4=1MHz. Con questa impostazione, e senza utilizzare il prescaler, possiamo misurare un tempo massimo di
+65536us (65ms) che per noi sono più che sufficenti.
+Quando il ricevitore IR-Rx emette un fronte di discesa, tramite l'interrupt, causa lo stop de timer0. Quando il timer0 viene fermato, andiamo a leggere il valore che ha raggiunto, determinando così il tempo trascorso.
+Per fare questo, andremo a memorizzare il valore in una variabile che chiameremo "Ttx", e da questa, calcoleremo la distanza tramite la formula fornita. La variabile Ttx dovràinoltre essere divisa per 1000000 poiché è espressa
+in us e per applicare la formula a noi occorrono i secondi; pertanto creeremo una variabile denominata "tempo" che indica il tempo in secondi.
+
+Ad indicare la distanza sarà una variabile, che chiameremo "distanza_in_metri", che assumerà il valore di distanza_in_metri=tempo*velocità.
+
+La variabile distanza sarà di tipo float ed espressa in metri. Per ottenere la visualizzazione richiesta, questa variabile sarà moltiplicata per 100 e il valore risultante verrà poi memorizzato all'interno di un'altra
+variabile che chiameremo "distanza_in_centimetri" che sarà di tipo intero. Sarà il valore della variabile "distanza_in_centimetri" (a 3 digit) che dovrà essere visualizzato sul display.
+
+Abbiamo ora definito quello che prevedeva il primo blocco: ricezione del segnale con il calcolo della velocità.
+In questo blocco viene adoperato il timer0 con il compito di misurare il tempo che impiega il segnale ad arrivare al nido.
+In questo blocco viene generato un interrupt dal registro INTCON.
+
+Il segnale proveniente dal pin 1 dell'integrato TSOP 1836, verrà collegato al pin RB1/INT1 del microcontrollore.
+L'alimentazione dell'integrato è a 5V.
+
+
+
+BLOCCO 3: Visualizzazione della distanza su display 
+Per la visualizzazione utilizzeremo la tecnica del multiplexing, codificando sul LATA il numero da visualizzare ed accendendo il corrispettivo display.
+La codifica del numero da visualizzare sarà contenunta all'interno di un vettore in cui l'elemento 0 corrisponde alla codifica del numero 0, l'elemento 1 alla codifica del numero 1 e così via.
+
+Dovranno essere inserite delle resistenze per ogni led in modo da limitarne la corrente. I valori delle resistenze sarà di 220ohm.
+
+I numeri da visualizzare nel nostro caso sono 3: centinaia, decine ed unità della variabile "distanza_in_centimetri".
+Queste tre cifre verranno memorizzate in 3 variabili diverse: centinaiaV (centinaia della velocità), decineV (decine della velocità) e unitaV (unità della velocità).
+Poiché abbiamo un numero a 3 digit, occorre memorizzare anche il resto della divisione (numero a 2 digit) che verrà memorizzato nella variabile "resto_divisione".
+Le variabili assumeranno il seguenti valori:
+centinaiaV=distanza_in_centimetri/100;
+resto_divisione=(distanza_in_centimetri%100)
+decineV=resto_divisione/10;
+unitaV=resto_divisione%10;
+
+Queste variabili assumeranno esattamente i valori delle tre cifre (unità, decine e centinaia) da visualizzare. 
+
+Occorre ora visualizzare questi valori uno per volta. Per fare questo, sfrutteremo il timer3. Questo timer sarà solamente impostato in modo tale da ottenere un overflow in 4ms, al termine del quale scatterà l'interrupt.
+Per ottenere un overflow in 4ms, considerando che i registri vengono incrementati alla frequenza di 1MHz, dobbiamo effettuare 4000 incrementi. Il conteggio dovrà quindi partire dal valore di 61536 (0xF060).
+
+Il tempo di overflow del timer3 andrà a determinare il tempo in cui viene cambiato il display e codificata la cifra corrispettiva.
+Ho scelto di utilizzare un tempo di 4ms di overflow percé, in questo modo, l'intera visualizzazione del numerò avverrà in 12ms e quindi ad una frequenza di 83Hz. Poiché l'occhio umano riesce a rilevare una frequenza
+massima di circa 40Hz, con 83Hz sono sicuro di ottenere una visualizzazione più che ottimale.
+
+Per spegnere/accendere un display, utilizzeremo un transistor collegato al catodo comune di questo. Occorranno quindi 3 transistor.
+
+Dimensionamento transistor:
+Il transistor che utilizzeremo è il BJT npn BC107 (T1, T2, T3). Questi saranno comandati dal pic tramite i pin LATC1, LATC2 e LATC3.
+Supponendo il caso in cui tutti i display sono accesi (stò visualizzando 8), verso il collettore scorre una corrente di 80mA (12mA circa per segmento).
+Questa corrente è la corrente di collettore Ic. 
+Il componente in questione ha un hFE che oscilla da un minimo di 110 ad un massimo di 450. Il transistor nel nostro caso verrà utilizzato come interruttore, perciò dovrà lavorare nelle zone di saturazione ed interdizione.
+Per assicurarmi che il BJT sia in saturazione, suppongo che l'hFE sia di 100. Da questo calcolo la corrente di base Ib>Ic/hFE: Ib>80mA/100=0.8mA.
+Determiniamo ora la resistenza di base Rb sapendo che la tensione ai capi del resistore è di Vbb-Vbe, in cui Vbb vale 5v (poiché il transistor è comandato dal pic) e Vbe vale 0,7V.
+Calcolo Rb: utilizzo l'equazione alla maglia Vbb-Ib*Rb-Vbe=0, Rb=(Vbb-Vbe)/Ib=(5-0,7)V/0.0008A=5375ohm. Per far si che il transistor sia in saturazione, la resistenza di base dev'essere inferiore al valore trovato, pertanto
+scelgo un valore commerciale di 4700ohm. I valori di R1, R2 ed R3 saranno i medesimi.
+
+All'interno dell'interrupt verranno eseguite le seguenti azioni (ciclicamente):
+
+spengo il display precedentemente attivato;
+codifico il valore da visualizzare;
+accendo il corrispettivo display;
+resetto il bit flag;
+
+
+Queste operazioni saranno gestite da uno switch case, in cui, di volta in volta, andremo a cambiare la cifra da visualizzare ed il corrispettivo display.
+I transistor dei display saranno collegati ai seguenti pin:
+DCD LATC1 (Display Centinaia Distanza)
+DDD LATC2 (Display Decine Distanza)
+DUD LATC3 (Display Unità Distanza)
+
+Abbiamo ora definito quello che prevedeva il terzo blocco: visualizzare la distanza.
+In questo blocco viene adoperato il timer3 con il compito di codificare la cifra da visualizzare ed accendere il corrispettivo display.
+In questo blocco viene generato un interrupt dal modulo timer3.
+I display sono collegati al LATA ed i catodi dei display (pin 12, 9 ed 8)  sono collegati ai collettori di 3 transistor BJT PNP BC107 (uno per ogni catodo).
+
+
+
+VALUTAZIONE DELL'ERRORE SULLA MISURA
+Nel caso in cui suppongo di lavorare ad una temperatura di 20°C, la velocità del suono è di 343.8m/s.
+In queste condizioni, il suono percorre una distanza di 10 metri in 29ms.
+
+Nel caso in cui si presenta una temperatura di -10°C, la velocità del suono è di 325.2m/s.
+In queste condizioni, il suono percorre una distanza di 10 metri in 30ms.
+
+Nel caso in cui si presenta una temperatura di 40°C, la velocità del suono è di 356.2m/s.
+In queste condizioni, il suono percorre una distanza di 10 metri in 28ms.
+
+L'errore, nei due casi, è di più o meno 1ms, che è il 3,3% della misura.
+
+Per ottenere una misura ulteriormente precisa, occorrerebbe utilizzare un sensore di temperatura e, rilevando la temperatura, ricavarsi la velocità del suono.
+A parer mio, un errore del 3,3% è trascurabile, e non occorre utilizzare questo tipo di accorgimento.
+
+
